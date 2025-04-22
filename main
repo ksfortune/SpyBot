@@ -1,0 +1,273 @@
+#!/usr/bin/python3
+
+import asyncio
+import random
+import sys
+import stikers
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.types import (
+    InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton,
+    ReplyKeyboardRemove
+)
+from aiogram.filters import Command
+from aiogram.filters import CommandStart
+from aiogram.fsm.storage.memory import MemoryStorage
+import logging
+
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.ERROR
+)
+logger = logging.getLogger(__name__)
+
+#добавить API_TOKEN
+API_TOKEN = ''
+
+PLAYERS = []
+SPIES = []
+ADMINS = []
+game_started = False
+roles_given = False
+PINNED_MESSAGE_ID = None
+
+bot = Bot(token=API_TOKEN)
+dp = Dispatcher(storage=MemoryStorage())
+
+
+def player_start_game():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎢 Вступить в игру", callback_data="enter_game")],
+        [InlineKeyboardButton(text="🚨 Раздать роли", callback_data="give_roles")]
+    ])
+
+
+def player_get_role():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🤸 Посмотреть роль", callback_data="get_role")],
+        [InlineKeyboardButton(text="💀 Выбыл", callback_data="delete_player")],
+        [InlineKeyboardButton(text="🏁 Завершить игру", callback_data="end_game")]
+    ])
+
+
+@dp.callback_query(F.data == "enter_game")
+async def enter_new_gamer(callback: types.CallbackQuery):
+    global PLAYERS
+    user_id = callback.from_user.id
+    if user_id in ADMINS:
+        await callback.answer("👮 Используй кнопку 'Раздать роли' для продолжения игры",
+                              show_alert=True)
+        return
+
+    if user_id not in PLAYERS:
+        PLAYERS.append(user_id)
+        username = callback.from_user.username or "будущий фулл"
+        await callback.message.answer(
+            f"✅ @{username}, ты теперь в игре! 🕹️",
+        )
+    else:
+        await callback.answer("👀 Ты уже в игре!", show_alert=True)
+
+
+@dp.callback_query(F.data == "give_roles")
+async def give_new_roles(callback: types.CallbackQuery):
+    global PLAYERS
+    global SPIES
+    if game_started:
+        user_id = callback.from_user.id
+        if user_id in ADMINS:
+            if len(PLAYERS) < 3:
+                await callback.answer("🙅‍♂️ Недостаточно игроков! Нужно минимум 3.",
+                                      show_alert=True)
+                return
+            spy_count = max(1, len(PLAYERS) * 20 // 100)
+            SPIES = random.sample(PLAYERS, spy_count)
+            await bot.edit_message_text(
+                chat_id=callback.message.chat.id,
+                message_id=PINNED_MESSAGE_ID,
+                text="🛑 Игра началась!\n\n🔒 Присоединение закрыто!\n🕵️ Кто-то теперь шпион... Не доверяй никому!",
+                reply_markup=player_get_role()
+            )
+            return
+
+        else:
+            await callback.answer("👮 Эту команду запускает Админ!", show_alert=True)
+
+
+@dp.callback_query(F.data == "get_role")
+async def get_new_roles(callback: types.CallbackQuery):
+    if game_started:
+        user_id = callback.from_user.id
+
+        if user_id in ADMINS:
+            s = []
+            for spy in SPIES:
+                user = await bot.get_chat(spy)
+                s.append(user.username)
+            await callback.answer(f"🕵️ Шпионы: {', '.join(str(i) for i in s)}",
+                                  show_alert=False)
+        else:
+            if user_id in SPIES:
+                await callback.answer("🕵️‍♂️ Твоя роль: Шпион!", show_alert=False)
+            else:
+                await callback.answer("🧑‍🌾 Твоя роль: Мирный житель!", show_alert=False)
+
+
+@dp.callback_query(F.data == "delete_player")
+async def delete_roles(callback: types.CallbackQuery):
+    if game_started:
+        global PLAYERS
+        global SPIES
+        user_id = callback.from_user.id
+        if user_id in ADMINS:
+            await callback.answer("👀 Админ не бросай игроков!", show_alert=True)
+        else:
+            role = "Мирный"
+            if user_id in SPIES:
+                role = "Шпион"
+                SPIES.remove(user_id)
+            PLAYERS.remove(user_id)
+
+            await callback.message.answer(
+                f"❌ @{callback.from_user.username} покинул игру.\n🎭 Его роль была: {role}\n\n"
+                f"🧮 Осталось:\n🕵️ Шпионов — {len(SPIES)}\n🧑‍🌾 Мирных — {len(PLAYERS) - len(SPIES)}"
+            )
+
+
+@dp.message(CommandStart())
+async def start_cmd(message: types.Message):
+    global PINNED_MESSAGE_ID
+    global game_started
+
+    if message.chat.type not in ["group", "supergroup"]:
+        await message.answer("❌ Эта игра доступна только в группах!",
+                             reply_markup=ReplyKeyboardRemove())
+        return
+
+    admins = await get_admin_ids(message.chat.id)
+
+    if message.from_user.id in admins:
+        if not game_started:
+            PINNED_MESSAGE = await message.answer(
+                "🔥 Всем привет! Игра начинается прямо сейчас!\n"
+                "Ниже появится кнопка — жми, чтобы войти в игру. Кто-то станет шпионом... 👀",
+                reply_markup=player_start_game()
+            )
+            PINNED_MESSAGE_ID = PINNED_MESSAGE.message_id
+            try:
+                await bot.pin_chat_message(
+                    chat_id=message.chat.id,
+                    message_id=PINNED_MESSAGE_ID,
+                )
+            except Exception as e:
+                print(f"Ошибка при закреплении сообщения: {e}")
+            game_started = True
+        else:
+            await message.answer("🎲 Игра уже запущена!")
+    elif not game_started:
+        await message.answer(
+            f"Хэй, @{message.from_user.username}! 👋\n"
+            "Игра ещё не началась, но скоро начнётся. Жди сигнала от ведущего! 🎮"
+        )
+    else:
+        sticker_id = random.choice(stikers.sticks)
+        await message.answer_sticker(sticker_id)
+
+
+@dp.callback_query(F.data == "end_game")
+async def end_game(callback: types.CallbackQuery):
+    global PINNED_MESSAGE_ID
+    if game_started:
+        chat_id = callback.message.chat.id
+        user_id = callback.from_user.id
+
+        if user_id not in ADMINS:
+            await callback.answer("Это только для админов 😜", show_alert=False)
+            return
+
+        else:
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🕵️ Победили шпионы",
+                                      callback_data="spies_win")],
+                [InlineKeyboardButton(text="🧑‍🌾 Победили мирные",
+                                      callback_data="civilians_win")]
+            ])
+
+            MESSAGE = await callback.message.answer(
+                "🏁 Игра завершена!\n\n🤔 Кто же победил?",
+                reply_markup=keyboard
+            )
+            await bot.edit_message_text(
+                chat_id=callback.message.chat.id,
+                message_id=PINNED_MESSAGE_ID,
+                text="Игра завершена! Выбираем победителей🤩\n\n"
+            )
+            await bot.unpin_chat_message(chat_id=chat_id, message_id=PINNED_MESSAGE_ID)
+            PINNED_MESSAGE_ID = MESSAGE.message_id
+            await callback.answer()
+
+
+@dp.callback_query(F.data.in_(["spies_win", "civilians_win"]))
+async def declare_winner(callback: types.CallbackQuery):
+    global game_started, roles_given, PINNED_MESSAGE_ID
+    if game_started:
+        user_id = callback.from_user.id
+
+        # Проверяем, что только админ может выбрать победителя
+        if user_id not in ADMINS:
+            await callback.answer("🚫 Только админ может выбрать победителя!",
+                                  show_alert=True)
+            return
+        winner = "🕵️ Шпионы" if callback.data == "spies_win" else "🧑‍🌾 Мирные"
+        await callback.message.answer(
+            f"🎉 Победители: {winner}!\n\nСпасибо за игру! 🥳"
+        )
+        await bot.unpin_chat_message(chat_id=callback.message.chat.id,
+                                     message_id=PINNED_MESSAGE_ID)
+        await bot.delete_message(chat_id=callback.message.chat.id,
+                                 message_id=PINNED_MESSAGE_ID)
+        sticker_id = random.choice(stikers.sticks)
+        await callback.message.answer_sticker(sticker_id)
+
+        PLAYERS.clear()
+        SPIES.clear()
+        game_started = False
+        roles_given = False
+        PINNED_MESSAGE_ID = None
+
+        await callback.answer()
+
+
+async def get_admin_ids(chat_id: int) -> list[int]:
+    global ADMINS
+    admins = await bot.get_chat_administrators(chat_id)
+    ADMINS = [admin.user.id for admin in admins]
+    return ADMINS
+
+
+@dp.message(Command("end"))
+async def end_game_cmd(message: types.Message):
+    user_id = message.from_user.id
+    global game_started, roles_given, PINNED_MESSAGE_ID
+    if user_id in ADMINS and game_started:
+        global PLAYERS
+        global SPIES
+        PLAYERS.clear()
+        SPIES.clear()
+        game_started = False
+        roles_given = False
+        await bot.edit_message_text(
+            chat_id=message.chat.id,
+            message_id=PINNED_MESSAGE_ID,
+            text=f"Игру завершили! Ждите сигнала от ведущего! 🎮",
+        )
+        await bot.unpin_chat_message(chat_id=message.chat.id,
+                                     message_id=PINNED_MESSAGE_ID)
+        PINNED_MESSAGE_ID = None
+        await message.answer("🚮 Игра окончена")
+
+
+async def main():
+    await dp.start_polling(bot)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
