@@ -3,7 +3,7 @@
 import asyncio
 import random
 import sys
-import stikers
+import stickers
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton,
